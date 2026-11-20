@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -12,8 +13,10 @@ import (
 	"github.com/tsic404/kosd/pkg/controlplane"
 	"github.com/tsic404/kosd/pkg/extension"
 	"github.com/tsic404/kosd/pkg/identity"
+	"github.com/tsic404/kosd/pkg/pages"
 	"github.com/tsic404/kosd/pkg/pages/cluster"
 	"github.com/tsic404/kosd/pkg/provider"
+	"github.com/tsic404/kosd/pkg/upgrade"
 )
 
 // capabilities reads the registered capabilities and their verification results
@@ -267,6 +270,138 @@ func (r *Readings) blockedProviders(ctx context.Context) (any, *controlplane.Err
 	return blockedProvidersValue{availability: observed(), Providers: blocked}, nil
 }
 
+// latestRecord returns the newest stored preflight record and the moment it
+// observed the cluster, so the shell applies C-13's bound to the record rather
+// than to this read (C-88).
+//
+// The preflight and blocked items of one page read take the same snapshot: a
+// preflight written between their reads must not make one page show two upgrade
+// plans (C-4, C-5). The snapshot is scoped to the page shell's read identity,
+// so two concurrent reads never share one, including reads that share a caller
+// context.
+func (r *Readings) latestRecord(ctx context.Context, item string) (upgrade.Record, time.Time, *controlplane.Error) {
+	id, live := pages.ReadIdentity(ctx)
+	if snapshot, found := r.snapshots.take(id, live, item); found {
+		return snapshot.record, snapshot.observed, snapshot.failure
+	}
+	record, observed, failure := r.loadRecord(ctx)
+	owed := make(map[string]bool, len(recordBackedItems))
+	for _, itemID := range recordBackedItems {
+		if itemID != item {
+			owed[itemID] = true
+		}
+	}
+	r.snapshots.keep(id, live, &recordSnapshot{record: record, observed: observed, failure: failure, owed: owed})
+	return record, observed, failure
+}
+
+// loadRecord reads the newest stored record and the moment it observed the
+// cluster.
+func (r *Readings) loadRecord(ctx context.Context) (upgrade.Record, time.Time, *controlplane.Error) {
+	if r.Preflights == nil {
+		return upgrade.Record{}, time.Time{}, &controlplane.Error{
+			Code:        controlplane.CodeCapabilityMissing,
+			Message:     "控制面没有接入预检记录来源，本次预检不可读",
+			Stage:       controlplane.StageCapability,
+			SideEffects: controlplane.SideEffectsNone,
+		}
+	}
+	records, err := r.Preflights.Records(ctx)
+	if err != nil {
+		return upgrade.Record{}, time.Time{}, &controlplane.Error{
+			Code:        controlplane.CodeCapabilityMissing,
+			Message:     "预检记录不可读取：" + err.Error(),
+			Stage:       controlplane.StageCapability,
+			SideEffects: controlplane.SideEffectsNone,
+		}
+	}
+	if len(records) == 0 {
+		return upgrade.Record{}, time.Time{}, &controlplane.Error{
+			Code:        controlplane.CodeCapabilityMissing,
+			Message:     "尚未执行预检，没有可读的预检记录",
+			Stage:       controlplane.StageCapability,
+			SideEffects: controlplane.SideEffectsNone,
+		}
+	}
+	newest := records[0]
+	return newest, newest.ObservedAt, nil
+}
+
+// preflight reports what the newest preflight recorded: the affected
+// applications, the downtime and, for an extension upgrade, the item-by-item
+// contribution difference (C-4).
+func (r *Readings) preflight(ctx context.Context) (any, time.Time, *controlplane.Error) {
+	record, observedAt, failure := r.latestRecord(ctx, ItemPreflight)
+	if failure != nil {
+		return unavailableValue(failure.Message), observedAt, nil
+	}
+	value := preflightValue{
+		availability:         observed(),
+		RecordID:             record.ID,
+		Kind:                 string(record.Request.Kind),
+		TargetVersion:        record.Result.TargetVersion,
+		DeclaredDowntime:     record.Result.DeclaredDowntime,
+		EstimatedDowntime:    record.Result.EstimatedDowntime,
+		AffectedApplications: append([]string(nil), record.Result.AffectedApplications...),
+		Superseded:           record.IsSuperseded,
+		Upgrade:              upgradeOf(record.Upgrade),
+	}
+	for _, component := range record.Result.Components {
+		entry := componentUpgrade{Component: component.Component, From: component.From, To: component.To}
+		for _, change := range component.Changes {
+			entry.Changes = append(entry.Changes, contributionChange{
+				Class:   change.Class,
+				Removed: append([]string(nil), change.Removed...),
+				Added:   append([]string(nil), change.Added...),
+			})
+		}
+		value.Components = append(value.Components, entry)
+	}
+	return value, observedAt, nil
+}
+
+// blockedUpgrades reports the framework API versions the target removes and the
+// installed extensions that still declare them, as the newest record holds them
+// (C-5, C-16).
+func (r *Readings) blockedUpgrades(ctx context.Context) (any, time.Time, *controlplane.Error) {
+	record, observedAt, failure := r.latestRecord(ctx, ItemBlockedUpgrades)
+	if failure != nil {
+		return unavailableValue(failure.Message), observedAt, nil
+	}
+	value := blockedUpgradesValue{
+		availability:             observed(),
+		RecordID:                 record.ID,
+		Blocked:                  record.Result.IsBlocked,
+		RemovedFrameworkVersions: append([]string(nil), record.Result.RemovedFrameworkVersions...),
+		Dependents:               make([]frameworkDependent, 0, len(record.Result.FrameworkDependents)),
+	}
+	for _, dependent := range record.Result.FrameworkDependents {
+		value.Dependents = append(value.Dependents, frameworkDependent{
+			Component:        dependent.Component,
+			Identifier:       dependent.Identifier,
+			FrameworkVersion: dependent.FrameworkVersion,
+		})
+	}
+	return value, observedAt, nil
+}
+
+// upgradeOf renders the upgrade write that referenced a record, when one did
+// (C-88).
+func upgradeOf(run *upgrade.UpgradeRun) *upgradeRun {
+	if run == nil {
+		return nil
+	}
+	rendered := &upgradeRun{
+		StartedAt:   run.StartedAt,
+		UpdatedAt:   run.UpdatedAt,
+		Differences: append([]string(nil), run.Differences...),
+	}
+	for _, node := range run.Nodes {
+		rendered.Nodes = append(rendered.Nodes, nodeOutcome{Node: node.Node, Version: node.Version, Result: node.Result})
+	}
+	return rendered
+}
+
 // conditionOf finds one condition by type.
 func conditionOf(conditions []metav1.Condition, conditionType string) (metav1.Condition, bool) {
 	for _, condition := range conditions {
@@ -363,15 +498,15 @@ func (r *Readings) compatibility(ctx context.Context) (any, *controlplane.Error)
 			entries = append(entries, entry)
 			continue
 		}
-		declaration, err := extension.Parse(content)
+		artifact, err := extension.Read(content)
 		if err != nil {
 			entry.Available = false
 			entry.Conclusion = ConclusionUnknown
-			entry.Reason = "扩展声明不可读，目标框架版本范围无法判定：" + err.Error()
+			entry.Reason = "扩展包不可读取，目标框架版本范围无法判定：" + err.Error()
 			entries = append(entries, entry)
 			continue
 		}
-		loaded, err := declaration.Load()
+		loaded, err := artifact.Declaration.Load()
 		if err != nil {
 			entry.Available = false
 			entry.Conclusion = ConclusionUnknown

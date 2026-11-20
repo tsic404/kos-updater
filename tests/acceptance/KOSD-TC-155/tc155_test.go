@@ -50,7 +50,7 @@ func TestTC155PackageStructure(t *testing.T) {
 		fields = append(fields, field)
 	}
 	sort.Strings(fields)
-	want := []string{"config", "contributions", "dependencies", "frameworkVersion", "id", "permissions", "status", "uninstallRetention", "version"}
+	want := []string{"configuration", "contributions", "dependencies", "frameworkVersion", "identifier", "permissions", "retention", "version"}
 	if len(fields) != len(want) {
 		t.Fatalf("manifest fields = %v, want the closed set %v", fields, want)
 	}
@@ -63,8 +63,8 @@ func TestTC155PackageStructure(t *testing.T) {
 	// The declaration the kernel activates and the declaration the package ships
 	// are the same contribution: one table produces both (C-17, C-18).
 	activated := fixtures.DeclarationMap(t)
-	if declared["id"] != activated["identifier"] {
-		t.Fatalf("package id = %v, want %v", declared["id"], activated["identifier"])
+	if declared["identifier"] != activated["identifier"] {
+		t.Fatalf("package identifier = %v, want %v", declared["identifier"], activated["identifier"])
 	}
 	if declared["version"] != activated["version"] || declared["frameworkVersion"] != activated["frameworkVersion"] {
 		t.Fatalf("package version pair = %v/%v, want %v/%v",
@@ -186,13 +186,12 @@ func TestTC155FirstPartyAndThirdPartyShareThePackageStructure(t *testing.T) {
 		t.Fatalf("build the product package: %v", err)
 	}
 	_, thirdParty, err := packaging.Pack(map[string]any{
-		"id": "third-party-demo", "version": "1.0.0", "frameworkVersion": ">=1.0 <2.0",
-		"contributions":      map[string]any{"pages": []any{map[string]any{"id": "demo"}}},
-		"dependencies":       map[string]any{},
-		"permissions":        map[string]any{},
-		"config":             map[string]any{},
-		"status":             map[string]any{},
-		"uninstallRetention": map[string]any{},
+		"identifier": "third-party-demo", "version": "1.0.0", "frameworkVersion": ">=1.0 <2.0",
+		"contributions": map[string]any{"pages": []any{map[string]any{"id": "demo"}}},
+		"dependencies":  map[string]any{},
+		"permissions":   []any{},
+		"configuration": map[string]any{},
+		"retention":     []any{},
 	}, nil)
 	if err != nil {
 		t.Fatalf("pack the third-party declaration: %v", err)

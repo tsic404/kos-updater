@@ -3,7 +3,12 @@
 // declares pages and ships no process of its own (C-18, C-53).
 package updater
 
-import "github.com/tsic404/kosd/pkg/extension"
+import (
+	"net/http"
+
+	"github.com/tsic404/kosd/pkg/extension"
+	"github.com/tsic404/kosd/pkg/write"
+)
 
 // Identifier is the product's extension identity across versions (C-17).
 const Identifier = "kos-updater"
@@ -45,12 +50,24 @@ const (
 	ItemBlockedProviders = "blocked-providers"
 )
 
-// Item identities of the update page, one per source C-2 names. The preflight
-// and the blocked-upgrade items belong to the follow-up increment; this package
-// declares the two read-only items alone.
+// Item identities of the update page, one per source C-2 names.
 const (
-	ItemVersions      = "versions"
-	ItemCompatibility = "extension-compatibility"
+	ItemVersions        = "versions"
+	ItemPreflight       = "upgrade-preflight"
+	ItemBlockedUpgrades = "blocked-upgrades"
+	ItemCompatibility   = "extension-compatibility"
+)
+
+// Action identities of the update page's two entries (C-6).
+const (
+	ActionPreflight = "preflight"
+	ActionUpgrade   = "upgrade"
+)
+
+// Control-plane paths the two entries write to (C-6, C-88).
+const (
+	pathPreflights = "/api/v1/upgrade-preflights"
+	pathUpgrades   = "/api/v1/upgrade-requests"
 )
 
 // ComponentItems lists the item identities of the component page, in declaration
@@ -64,19 +81,24 @@ var ComponentItems = []string{
 }
 
 // UpdateItems lists the item identities of the update page, in declaration order
-// (C-2).
+// (C-2): the version pair, what the preflight recorded, what blocks the upgrade,
+// and the compatibility conclusions.
 var UpdateItems = []string{
 	ItemVersions,
+	ItemPreflight,
+	ItemBlockedUpgrades,
 	ItemCompatibility,
 }
 
-// Read-only reasons: neither page carries a modification entry in this
-// increment. The component view is read-only by its contract (C-1); the update
-// view states why it offers none until its preflight and upgrade entries
-// arrive with the follow-up increment (C-6).
+// Display reasons of the update page's items: the page carries the two Owner
+// entries, and every display item states why it is not editable itself (C-6,
+// C-53). The component view is read-only by its contract (C-1).
 const (
 	ComponentsReadOnlyReason = "本页只读：组件启停经系统组件资源与安装流程发起，能力来自 Provider 的注册与验证结果"
-	UpdatesReadOnlyReason    = "本页只读：平台与扩展升级由 kosadm 与 kosd 执行，本页呈现版本与兼容性"
+	ReasonVersions           = "版本发现只读，页面不写入"
+	ReasonPreflight          = "预检结果由控制面的预检写入产生，页面只读同一条记录"
+	ReasonBlockedUpgrades    = "阻塞结论由预检写入按框架版本轴算出，页面只读记录里的依赖者"
+	ReasonCompatibility      = "相容结论由扩展声明与框架版本算出，页面不写入"
 )
 
 // Declaration returns the contribution kos-updater ships (C-18): the two
@@ -111,18 +133,22 @@ func componentsPage() extension.Page {
 	}
 }
 
-// updatesPage declares the update items C-2 names, each with the source type
-// that judges it.
+// updatesPage declares the update items C-2 names and the two entries C-6 gives
+// the Owner alone: the control-plane preflight write and the upgrade write.
 func updatesPage() extension.Page {
 	return extension.Page{
-		ID:             PageUpdates,
-		Title:          "更新",
-		Location:       "panel",
-		ReadOnly:       true,
-		ReadOnlyReason: UpdatesReadOnlyReason,
+		ID:       PageUpdates,
+		Title:    "更新",
+		Location: "panel",
 		Items: []extension.PageItem{
-			{ID: ItemVersions, Label: "KOS 版本与集群版本", Source: extension.PageSourceComputed, Reference: reference(ItemVersions)},
-			{ID: ItemCompatibility, Label: "扩展与框架版本兼容性", Source: extension.PageSourceComputed, Reference: reference(ItemCompatibility)},
+			{ID: ItemVersions, Label: "KOS 版本与集群版本", Source: extension.PageSourceComputed, Reference: reference(ItemVersions), Reason: ReasonVersions},
+			{ID: ItemPreflight, Label: "平台与扩展升级的预检", Source: extension.PageSourceDatabase, Reference: reference(ItemPreflight), Reason: ReasonPreflight},
+			{ID: ItemBlockedUpgrades, Label: "升级被阻塞的扩展与依赖者", Source: extension.PageSourceComputed, Reference: reference(ItemBlockedUpgrades), Reason: ReasonBlockedUpgrades},
+			{ID: ItemCompatibility, Label: "扩展与框架版本兼容性", Source: extension.PageSourceComputed, Reference: reference(ItemCompatibility), Reason: ReasonCompatibility},
+		},
+		Actions: []extension.Action{
+			{ID: ActionPreflight, Method: http.MethodPost, Path: pathPreflights, RequiredRole: string(write.RoleOwner)},
+			{ID: ActionUpgrade, Method: http.MethodPost, Path: pathUpgrades, RequiredRole: string(write.RoleOwner)},
 		},
 	}
 }

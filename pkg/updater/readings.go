@@ -13,6 +13,7 @@ import (
 	"github.com/tsic404/kosd/pkg/identity"
 	"github.com/tsic404/kosd/pkg/pages"
 	"github.com/tsic404/kosd/pkg/pages/cluster"
+	"github.com/tsic404/kosd/pkg/upgrade"
 )
 
 // Readings resolves the items the component and update pages declare (C-53).
@@ -24,26 +25,46 @@ type Readings struct {
 	// Artifacts reads the package an installed component names; nil leaves the
 	// compatibility item stating that it cannot be observed (C-7).
 	Artifacts extension.ArtifactSource
+	// Preflights reads the control-plane upgrade preflight records the update
+	// page shows (C-88); nil leaves the preflight and blocked items stating that
+	// no record source is wired.
+	Preflights Preflights
+	// snapshots holds the newest record one page read resolves, so the preflight
+	// and blocked items of that read present the same record even when a new
+	// preflight lands between their reads (C-4, C-5).
+	snapshots snapshots
 	// Now supplies the read clock; defaults to time.Now.
 	Now func() time.Time
 }
 
+// Preflights is the control-plane read seam for upgrade preflight records
+// (C-88). The record domain implements it; the page never computes a preflight
+// of its own.
+type Preflights interface {
+	// Records lists the stored records, newest first.
+	Records(ctx context.Context) ([]upgrade.Record, error)
+}
+
 // Read implements pages.Readings.
 func (r *Readings) Read(ctx context.Context, session identity.Session, item extension.PageItem) (pages.Reading, *controlplane.Error) {
-	value, failure := r.value(ctx, session, item)
+	value, observedAt, failure := r.value(ctx, session, item)
 	if failure != nil {
 		return pages.Reading{}, failure
 	}
-	return pages.Reading{Value: value, ObservedAt: r.clock()}, nil
+	if observedAt.IsZero() {
+		observedAt = r.clock()
+	}
+	return pages.Reading{Value: value, ObservedAt: observedAt}, nil
 }
 
 // value resolves one item from the source it declares. A source the control
 // plane cannot observe keeps its item on the page and states the reason, rather
 // than failing the page or blanking the item (C-7).
-func (r *Readings) value(ctx context.Context, session identity.Session, item extension.PageItem) (any, *controlplane.Error) {
+func (r *Readings) value(ctx context.Context, session identity.Session, item extension.PageItem) (any, time.Time, *controlplane.Error) {
 	var (
-		value   any
-		failure *controlplane.Error
+		value      any
+		observedAt time.Time
+		failure    *controlplane.Error
 	)
 	switch item.ID {
 	case ItemCapabilities:
@@ -58,15 +79,19 @@ func (r *Readings) value(ctx context.Context, session identity.Session, item ext
 		value, failure = r.blockedProviders(ctx)
 	case ItemVersions:
 		value, failure = r.versions(ctx)
+	case ItemPreflight:
+		value, observedAt, failure = r.preflight(ctx)
+	case ItemBlockedUpgrades:
+		value, observedAt, failure = r.blockedUpgrades(ctx)
 	case ItemCompatibility:
 		value, failure = r.compatibility(ctx)
 	default:
-		return nil, unknownItem(item.ID)
+		return nil, time.Time{}, unknownItem(item.ID)
 	}
 	if failure != nil {
-		return unavailableValue(failure.Message), nil
+		return unavailableValue(failure.Message), observedAt, nil
 	}
-	return value, nil
+	return value, observedAt, nil
 }
 
 // clock is the moment a read observed the value (C-13).
