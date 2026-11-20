@@ -1,5 +1,7 @@
 package updater
 
+import "time"
+
 // The value types of the declared items. Every item is one JSON object whose
 // fields are the source's own facts; a source that cannot be observed yields the
 // unavailable shape instead (C-7).
@@ -101,4 +103,71 @@ type compatibilityEntry struct {
 	Conclusion                   string `json:"conclusion"`
 	ComponentPhase               string `json:"componentPhase,omitempty"`
 	ComponentFrameworkCompatible string `json:"componentFrameworkCompatible,omitempty"`
+}
+
+// preflightValue is what the newest preflight recorded (C-4): the affected
+// applications, the downtime and, for an extension upgrade, the contribution
+// difference of every target.
+type preflightValue struct {
+	availability
+	RecordID             string             `json:"recordId"`
+	Kind                 string             `json:"kind,omitempty"`
+	TargetVersion        string             `json:"targetVersion,omitempty"`
+	DeclaredDowntime     string             `json:"declaredDowntime,omitempty"`
+	EstimatedDowntime    string             `json:"estimatedDowntime,omitempty"`
+	AffectedApplications []string           `json:"affectedApplications"`
+	Components           []componentUpgrade `json:"components,omitempty"`
+	Superseded           bool               `json:"superseded"`
+	Upgrade              *upgradeRun        `json:"upgrade,omitempty"`
+}
+
+// componentUpgrade is one extension target's recorded contribution difference
+// (C-4, C-55).
+type componentUpgrade struct {
+	Component string               `json:"component"`
+	From      string               `json:"from,omitempty"`
+	To        string               `json:"to,omitempty"`
+	Changes   []contributionChange `json:"changes,omitempty"`
+}
+
+// contributionChange is one class's difference between the installed and the
+// target declaration (C-55).
+type contributionChange struct {
+	Class   string   `json:"class"`
+	Removed []string `json:"removed,omitempty"`
+	Added   []string `json:"added,omitempty"`
+}
+
+// upgradeRun is the upgrade write that referenced the record (C-88).
+type upgradeRun struct {
+	StartedAt   time.Time     `json:"startedAt"`
+	UpdatedAt   time.Time     `json:"updatedAt"`
+	Differences []string      `json:"differences,omitempty"`
+	Nodes       []nodeOutcome `json:"nodes,omitempty"`
+}
+
+// nodeOutcome is one node's result on the upgrade that referenced the record.
+type nodeOutcome struct {
+	Node    string `json:"node"`
+	Version string `json:"version,omitempty"`
+	Result  string `json:"result"`
+}
+
+// blockedUpgradesValue is the blocked-upgrade item (C-5): the framework API
+// versions the target removes and the installed extensions that still declare
+// them, read from the newest record.
+type blockedUpgradesValue struct {
+	availability
+	RecordID                 string               `json:"recordId"`
+	Blocked                  bool                 `json:"blocked"`
+	RemovedFrameworkVersions []string             `json:"removedFrameworkVersions"`
+	Dependents               []frameworkDependent `json:"dependents"`
+}
+
+// frameworkDependent is one extension that declares a removed framework API
+// version and no target one (C-16).
+type frameworkDependent struct {
+	Component        string `json:"component"`
+	Identifier       string `json:"identifier,omitempty"`
+	FrameworkVersion string `json:"frameworkVersion,omitempty"`
 }
